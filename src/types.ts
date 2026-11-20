@@ -61,3 +61,14 @@ export interface DetectedSymbol {
   magnitude: number;
   timestamp: number;
 }
+
+export interface ChannelHealth {
+  audibleScore: number;
+  stealthScore: number;
+  stealthSupported: boolean;
+  recommendedMode: TransmissionMode;
+  noiseFloorDb: number;
+  snrDb: number;
+  cutoffFreq: number;
+  reason: string;
+}

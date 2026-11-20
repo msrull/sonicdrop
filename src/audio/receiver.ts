@@ -12,10 +12,12 @@ import {
 import { decodePacket, calcEncodedByteCount } from '../core/framing';
 import { decompress } from '../core/compression';
 import { decrypt } from '../core/crypto';
+import { evaluateSpectrumHealth } from '../core/calibration';
 import type {
   ReceiveResult,
   ReceiveState,
   TransmissionMode,
+  ChannelHealth,
 } from '../types';
 
 export class Receiver {
@@ -54,6 +56,7 @@ export class Receiver {
   onError?: (err: Error) => void;
   onAnalyserReady?: (analyser: AnalyserNode) => void;
   onMicLevel?: (normalized: number, db: number) => void;
+  onChannelHealth?: (health: ChannelHealth) => void;
 
   private setState(newState: ReceiveState) {
     this.state = newState;
@@ -381,5 +384,12 @@ export class Receiver {
 
   getAnalyser(): AnalyserNode | null {
     return this.analyserNode;
+  }
+
+  getChannelHealth(): ChannelHealth | null {
+    if (!this.analyserNode || !this.ctx) return null;
+    const freqData = new Float32Array(this.analyserNode.frequencyBinCount);
+    this.analyserNode.getFloatFrequencyData(freqData);
+    return evaluateSpectrumHealth(freqData, this.ctx.sampleRate);
   }
 }

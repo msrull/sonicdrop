@@ -14,7 +14,7 @@
     "build": "npm run build:web && npm run build:cli",
     "preview": "vite preview",
     "cli": "node bin/sonicdrop-cli.js",
-    "test": "npx tsx tests/core.test.ts"
+    "test": "npx tsx tests/core.test.ts && npx tsx tests/calibration.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

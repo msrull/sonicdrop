@@ -3,6 +3,7 @@ import { encodePacket } from '../core/framing';
 import { generateAudioSamples } from '../core/fsk';
 import { maybeCompress } from '../core/compression';
 import { encrypt } from '../core/crypto';
+import { generateCalibrationChirp } from '../core/calibration';
 import type { TransmitOptions, TransmitState } from '../types';
 
 export class Transmitter {
@@ -72,6 +73,49 @@ export class Transmitter {
       const dur = pcm.length / SAMPLE_RATE;
       this.setState('transmitting');
 
+      this.progressTimer = window.setInterval(() => {
+        if (this.ctx && this.state === 'transmitting') {
+          this.onProgress?.(Math.min(1, this.ctx.currentTime / dur));
+        }
+      }, 50);
+
+      this.src.onended = () => {
+        clearInterval(this.progressTimer);
+        this.onProgress?.(1);
+        this.setState('done');
+      };
+
+      this.src.start();
+    } catch (e) {
+      this.setState('error');
+      throw e;
+    }
+  }
+
+  async playCalibrationChirp(): Promise<void> {
+    try {
+      this.setState('transmitting');
+      const pcm = generateCalibrationChirp(SAMPLE_RATE, 0.8);
+
+      this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      if (this.ctx.state === 'suspended') {
+        await this.ctx.resume();
+      }
+
+      const buf = this.ctx.createBuffer(1, pcm.length, SAMPLE_RATE);
+      buf.copyToChannel(pcm as any, 0);
+
+      this.analyserNode = this.ctx.createAnalyser();
+      this.analyserNode.fftSize = 2048;
+      this.analyserNode.smoothingTimeConstant = 0.3;
+      this.onAnalyserReady?.(this.analyserNode);
+
+      this.src = this.ctx.createBufferSource();
+      this.src.buffer = buf;
+      this.src.connect(this.analyserNode);
+      this.analyserNode.connect(this.ctx.destination);
+
+      const dur = pcm.length / SAMPLE_RATE;
       this.progressTimer = window.setInterval(() => {
         if (this.ctx && this.state === 'transmitting') {
           this.onProgress?.(Math.min(1, this.ctx.currentTime / dur));

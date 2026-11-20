@@ -1,6 +1,7 @@
 import { Transmitter } from '../audio/transmitter';
 import { Receiver } from '../audio/receiver';
 import { pcmToWavBlob, downloadBlob } from '../core/wav';
+import { evaluateSpectrumHealth } from '../core/calibration';
 import type { TransmissionMode } from '../types';
 
 const BANDS: Record<TransmissionMode, [number, number]> = {
@@ -29,6 +30,7 @@ export class App {
   private hiddenText = true;
   private receivedPayload = '';
   private rafId = 0;
+  private frameCounter = 0;
 
   private currentAnalyser: AnalyserNode | null = null;
   private freqData: Uint8Array | null = null;
@@ -88,6 +90,10 @@ export class App {
                     <div><b>Audible</b><span>2–5.5 kHz, most reliable in noisy rooms</span></div>
                   </label>
                 </div>
+                <div class="row" style="margin-top: 6px;">
+                  <span class="sub" id="cal-hint-send">Channel calibration</span>
+                  <button class="link" id="btn-sweep" type="button">Play sweep test</button>
+                </div>
                 <div class="f">
                   <label class="lab" for="pin">PIN <span class="sub">(optional)</span></label>
                   <input type="text" id="pin" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="4 digits">
@@ -116,6 +122,9 @@ export class App {
                     <input type="radio" name="ch-recv" value="audible">
                     <div><b>Audible</b><span>2–5.5 kHz, most reliable in noisy rooms</span></div>
                   </label>
+                </div>
+                <div class="row" style="margin-top: 6px;">
+                  <span class="sub" id="cal-hint-recv">Auto-profiling active while listening</span>
                 </div>
               </div>
 
@@ -271,6 +280,24 @@ export class App {
         }
       }
       this.cx.globalAlpha = 1;
+
+      this.frameCounter = (this.frameCounter || 0) + 1;
+      if (this.frameCounter % 30 === 0 && this.panel === 'recv' && this.isRunning) {
+        this.updateLiveChannelHealth();
+      }
+    }
+  }
+
+  private updateLiveChannelHealth(): void {
+    if (!this.freqData) return;
+    const health = evaluateSpectrumHealth(this.freqData, 48000);
+    const hint = this.root.querySelector('#cal-hint-recv') as HTMLElement;
+    if (!hint) return;
+
+    if (health.stealthSupported) {
+      hint.innerHTML = `<span style="color:#10b981;font-weight:500;">● Stealth ready</span> • Cutoff: ${(health.cutoffFreq / 1000).toFixed(1)} kHz (SNR: ${health.snrDb} dB)`;
+    } else {
+      hint.innerHTML = `<span style="color:#f59e0b;font-weight:500;">● Audible recommended</span> • ${health.reason}`;
     }
   }
 
@@ -408,6 +435,43 @@ export class App {
     const wav = this.root.querySelector('#wav') as HTMLButtonElement;
     wav.addEventListener('click', () => {
       this.handleSaveWav();
+    });
+
+    const btnSweep = this.root.querySelector('#btn-sweep') as HTMLButtonElement;
+    btnSweep?.addEventListener('click', async () => {
+      if (this.isRunning) return;
+      this.isRunning = true;
+      btnSweep.disabled = true;
+      btnSweep.textContent = 'Sweeping...';
+      const viz = this.root.querySelector('#viz') as HTMLElement;
+      const hint = this.root.querySelector('#hint') as HTMLElement;
+      this.cx.clearRect(0, 0, this.cv.width, this.cv.height);
+      hint.hidden = true;
+      viz.classList.add('l');
+      this.say('busy', 'Acoustic sweep', 'Broadcasting 1–20.5 kHz channel calibration chirp.');
+
+      this.transmitter.onStateChange = (state) => {
+        if (state === 'done') {
+          this.say('ok', 'Sweep complete', 'Frequency spectrum benchmark broadcasted.');
+          btnSweep.disabled = false;
+          btnSweep.textContent = 'Play sweep test';
+          this.stopCurrent(true);
+        } else if (state === 'error') {
+          this.say('error', 'Sweep error', 'Failed to play calibration sweep.');
+          btnSweep.disabled = false;
+          btnSweep.textContent = 'Play sweep test';
+          this.stopCurrent(false);
+        }
+      };
+
+      try {
+        await this.transmitter.playCalibrationChirp();
+      } catch (e: any) {
+        alert('Calibration error: ' + e.message);
+        btnSweep.disabled = false;
+        btnSweep.textContent = 'Play sweep test';
+        this.stopCurrent(false);
+      }
     });
 
     const rx = this.root.querySelector('#rx') as HTMLButtonElement;
