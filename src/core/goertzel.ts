@@ -6,9 +6,7 @@ export function goertzel(
   sampleRate: number,
 ): number {
   const N = samples.length;
-  const k = Math.round((freq * N) / sampleRate);
-  const w = (2 * Math.PI * k) / N;
-  const coeff = 2 * Math.cos(w);
+  const coeff = 2 * Math.cos((2 * Math.PI * freq) / sampleRate);
 
   let s1 = 0;
   let s2 = 0;

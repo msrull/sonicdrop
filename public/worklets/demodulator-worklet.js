@@ -22,8 +22,7 @@ class DemodulatorProcessor extends AudioWorkletProcessor {
         this._hop = 0;
 
         this._coeffs = d.frequencies.map((f) => {
-          const k = Math.round((f * this._blockSize) / sampleRate);
-          return 2 * Math.cos((2 * Math.PI * k) / this._blockSize);
+          return 2 * Math.cos((2 * Math.PI * f) / sampleRate);
         });
         this._active = true;
       } else if (d.type === 'stop') {

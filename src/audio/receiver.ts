@@ -7,9 +7,7 @@ import {
   PREAMBLE_PATTERN,
   PREAMBLE_LENGTH,
   GOERTZEL_THRESHOLD,
-  HEADER_BYTES,
-  CRC_BYTES,
-  RS_PARITY_BYTES,
+  GOERTZEL_SNR_RATIO,
 } from '../core/constants';
 import { decodePacket, calcEncodedByteCount } from '../core/framing';
 import { decompress } from '../core/compression';
@@ -26,6 +24,7 @@ export class Receiver {
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private bandpassFilter: BiquadFilterNode | null = null;
   private workletNode: AudioWorkletNode | null = null;
+  private muteGain: GainNode | null = null;
   private analyserNode: AnalyserNode | null = null;
 
   state: ReceiveState = 'idle';
@@ -35,11 +34,18 @@ export class Receiver {
   private preambleBuffer: number[] = [];
   private capturedSymbols: number[] = [];
   private expectedSymbolsTotal = 0;
-  private currentSymbolHoldCount = 0;
   private lastDetectedSymbol = -1;
   private isSynchronized = false;
   private startTime = 0;
-  private meterTimer: number = 0;
+  private meterTimer = 0;
+
+  private hopCount = 0;
+  private tone7PeakHop = 0;
+  private tone7PeakMag = 0;
+  private tone7Hops = 0;
+  private nextSampleHop = 0;
+  private silenceHops = 0;
+  private readonly hopsPerSymbol = Math.round(TOTAL_SYMBOL_SAMPLES / (GUARD_SAMPLES / 2));
 
   onStateChange?: (state: ReceiveState) => void;
   onSymbolDetected?: (symbol: number, mag: number) => void;
@@ -82,13 +88,13 @@ export class Receiver {
 
       this.bandpassFilter = this.ctx.createBiquadFilter();
       if (mode === 'stealth') {
-        this.bandpassFilter.type = 'bandpass';
-        this.bandpassFilter.frequency.value = 18875;
-        this.bandpassFilter.Q.value = 8.0;
+        this.bandpassFilter.type = 'highpass';
+        this.bandpassFilter.frequency.value = 16000;
+        this.bandpassFilter.Q.value = 0.707;
       } else {
-        this.bandpassFilter.type = 'bandpass';
-        this.bandpassFilter.frequency.value = 3750;
-        this.bandpassFilter.Q.value = 1.5;
+        this.bandpassFilter.type = 'highpass';
+        this.bandpassFilter.frequency.value = 1500;
+        this.bandpassFilter.Q.value = 0.707;
       }
 
       this.analyserNode = this.ctx.createAnalyser();
@@ -114,9 +120,14 @@ export class Receiver {
         }
       };
 
+      this.muteGain = this.ctx.createGain();
+      this.muteGain.gain.value = 0;
+
       this.sourceNode.connect(this.bandpassFilter);
       this.bandpassFilter.connect(this.analyserNode);
       this.analyserNode.connect(this.workletNode);
+      this.workletNode.connect(this.muteGain);
+      this.muteGain.connect(this.ctx.destination);
 
       this.meterTimer = window.setInterval(() => {
         if (!this.analyserNode) return;
@@ -144,99 +155,106 @@ export class Receiver {
     this.preambleBuffer = [];
     this.capturedSymbols = [];
     this.expectedSymbolsTotal = 0;
-    this.currentSymbolHoldCount = 0;
     this.lastDetectedSymbol = -1;
     this.isSynchronized = false;
+    this.hopCount = 0;
+    this.tone7PeakHop = 0;
+    this.tone7PeakMag = 0;
+    this.tone7Hops = 0;
+    this.nextSampleHop = 0;
+    this.silenceHops = 0;
   }
 
   private processMagnitudes(mags: Float32Array) {
+    this.hopCount++;
+
     let maxVal = 0;
     let maxIdx = -1;
+    let sum = 0;
     for (let i = 0; i < mags.length; i++) {
+      sum += mags[i];
       if (mags[i] > maxVal) {
         maxVal = mags[i];
         maxIdx = i;
       }
     }
 
-    const detected = maxVal >= GOERTZEL_THRESHOLD ? maxIdx : -1;
+    const noise = (sum - maxVal) / (mags.length - 1);
+    const detected = maxVal >= GOERTZEL_THRESHOLD && maxVal >= GOERTZEL_SNR_RATIO * noise ? maxIdx : -1;
     this.onSymbolDetected?.(detected, maxVal);
 
     if (!this.isSynchronized) {
-      this.handlePreambleSearch(detected);
+      this.handlePreambleSearch(detected, maxVal);
     } else {
-      this.handleSymbolCollection(detected);
+      this.handleSymbolCollection(detected, maxIdx);
     }
   }
 
-  private handlePreambleSearch(symbol: number) {
-    if (symbol === -1) {
-      this.currentSymbolHoldCount = 0;
-      return;
-    }
-
-    if (symbol === this.lastDetectedSymbol) {
-      this.currentSymbolHoldCount++;
-    } else {
-      this.lastDetectedSymbol = symbol;
-      this.currentSymbolHoldCount = 1;
-
-      const expectedNext = this.preambleBuffer.length;
-      if (symbol === PREAMBLE_PATTERN[expectedNext]) {
-        this.preambleBuffer.push(symbol);
-        this.setState('syncing');
-
-        if (this.preambleBuffer.length === PREAMBLE_LENGTH) {
+  private handlePreambleSearch(detected: number, maxVal: number) {
+    if (detected !== -1) {
+      if (detected !== this.lastDetectedSymbol) {
+        this.lastDetectedSymbol = detected;
+        const expected = this.preambleBuffer.length;
+        if (expected < PREAMBLE_LENGTH && detected === PREAMBLE_PATTERN[expected]) {
+          this.preambleBuffer.push(detected);
+          this.setState('syncing');
+          if (detected === 7) {
+            this.tone7PeakHop = this.hopCount;
+            this.tone7PeakMag = maxVal;
+            this.tone7Hops = 1;
+          }
+        } else if (detected === PREAMBLE_PATTERN[0]) {
+          this.preambleBuffer = [detected];
+          this.setState('syncing');
+        } else {
+          this.preambleBuffer = [];
+          this.setState('listening');
+        }
+      } else if (detected === 7 && this.preambleBuffer.length === PREAMBLE_LENGTH) {
+        this.tone7Hops++;
+        if (maxVal > this.tone7PeakMag) {
+          this.tone7PeakMag = maxVal;
+          this.tone7PeakHop = this.hopCount;
+        }
+        if (this.tone7Hops >= 4) {
           this.isSynchronized = true;
           this.startTime = performance.now();
           this.capturedSymbols = [];
+          this.expectedSymbolsTotal = 0;
+          this.silenceHops = 0;
+          this.nextSampleHop = this.tone7PeakHop + this.hopsPerSymbol;
           this.setState('receiving');
         }
-      } else if (symbol === PREAMBLE_PATTERN[0]) {
-        this.preambleBuffer = [symbol];
-        this.setState('syncing');
-      } else {
-        this.preambleBuffer = [];
-        this.setState('listening');
       }
     }
   }
 
-  private handleSymbolCollection(symbol: number) {
-    if (symbol !== -1) {
-      if (symbol !== this.lastDetectedSymbol) {
-        this.lastDetectedSymbol = symbol;
-        this.currentSymbolHoldCount = 1;
-        this.capturedSymbols.push(symbol);
-
-        this.checkDynamicPacketLength();
-        this.onProgress?.(this.capturedSymbols.length, this.expectedSymbolsTotal);
-
-        if (this.expectedSymbolsTotal > 0 && this.capturedSymbols.length >= this.expectedSymbolsTotal) {
-          this.finishCaptureAndDecode();
-        }
-      } else {
-        this.currentSymbolHoldCount++;
-        const expectedTicksPerSymbol = Math.round(TOTAL_SYMBOL_SAMPLES / (GUARD_SAMPLES / 2));
-        if (this.currentSymbolHoldCount >= expectedTicksPerSymbol * 1.6) {
-          this.capturedSymbols.push(symbol);
-          this.currentSymbolHoldCount = 1;
-          this.checkDynamicPacketLength();
-          this.onProgress?.(this.capturedSymbols.length, this.expectedSymbolsTotal);
-
-          if (this.expectedSymbolsTotal > 0 && this.capturedSymbols.length >= this.expectedSymbolsTotal) {
-            this.finishCaptureAndDecode();
-          }
-        }
+  private handleSymbolCollection(detected: number, maxIdx: number) {
+    if (detected === -1) {
+      this.silenceHops++;
+      if (this.silenceHops > this.hopsPerSymbol * 5 && this.capturedSymbols.length >= 8) {
+        this.finishCaptureAndDecode();
+        return;
       }
     } else {
-      this.lastDetectedSymbol = -1;
-      this.currentSymbolHoldCount = 0;
+      this.silenceHops = 0;
+    }
+
+    if (this.hopCount === this.nextSampleHop) {
+      this.capturedSymbols.push(maxIdx);
+      this.nextSampleHop += this.hopsPerSymbol;
+
+      this.checkDynamicPacketLength();
+      this.onProgress?.(this.capturedSymbols.length, this.expectedSymbolsTotal);
+
+      if (this.expectedSymbolsTotal > 0 && this.capturedSymbols.length >= this.expectedSymbolsTotal) {
+        this.finishCaptureAndDecode();
+      }
     }
   }
 
   private checkDynamicPacketLength() {
-    if (this.expectedSymbolsTotal === 0 && this.capturedSymbols.length >= 8) {
+    if (this.expectedSymbolsTotal === 0 && this.capturedSymbols.length >= 6) {
       try {
         let byte0 = 0;
         let byte1 = 0;
@@ -266,9 +284,9 @@ export class Receiver {
     const durMs = performance.now() - this.startTime;
 
     try {
-      const encodedByteCount = calcEncodedByteCount(
-        Math.floor((this.capturedSymbols.length * 3) / 8) - (HEADER_BYTES + CRC_BYTES + RS_PARITY_BYTES),
-      );
+      const encodedByteCount = this.expectedSymbolsTotal > 0
+        ? Math.floor((this.expectedSymbolsTotal * 3) / 8)
+        : Math.floor((this.capturedSymbols.length * 3) / 8);
 
       const { header, data, errorsFixed } = decodePacket(
         this.capturedSymbols,
@@ -313,6 +331,13 @@ export class Receiver {
     if (this.meterTimer) {
       clearInterval(this.meterTimer);
       this.meterTimer = 0;
+    }
+
+    if (this.muteGain) {
+      try {
+        this.muteGain.disconnect();
+      } catch {}
+      this.muteGain = null;
     }
 
     if (this.workletNode) {
