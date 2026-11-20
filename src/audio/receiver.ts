@@ -23,6 +23,7 @@ import {
 import { decompress } from '../core/compression';
 import { decrypt } from '../core/crypto';
 import { evaluateSpectrumHealth } from '../core/calibration';
+import { unpackFile } from '../core/file-pack';
 import type {
   ReceiveResult,
   ReceiveState,
@@ -432,7 +433,21 @@ export class Receiver {
         payload = await decompress(payload);
       }
 
-      const text = new TextDecoder().decode(payload);
+      const unpacked = unpackFile(payload);
+      let text = '';
+      let fileMeta: ReceiveResult['file'] = undefined;
+
+      if (unpacked.isFile && unpacked.file) {
+        text = `File: ${unpacked.file.name}`;
+        fileMeta = {
+          name: unpacked.file.name,
+          mime: unpacked.file.mime,
+          data: unpacked.file.data,
+          size: unpacked.file.data.length,
+        };
+      } else {
+        text = new TextDecoder().decode(payload);
+      }
 
       const result: ReceiveResult = {
         text,
@@ -443,6 +458,7 @@ export class Receiver {
         byteLength: payload.length,
         durationMs: durMs,
         errorsFixed,
+        file: fileMeta,
       };
 
       this.setState('done');

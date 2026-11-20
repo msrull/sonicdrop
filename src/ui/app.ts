@@ -2,6 +2,7 @@ import { Transmitter } from '../audio/transmitter';
 import { Receiver } from '../audio/receiver';
 import { pcmToWavBlob, downloadBlob } from '../core/wav';
 import { evaluateSpectrumHealth } from '../core/calibration';
+import { packFile } from '../core/file-pack';
 import type { TransmissionMode, SpeedProfile } from '../types';
 
 const BANDS: Record<TransmissionMode, [number, number]> = {
@@ -30,6 +31,8 @@ export class App {
   private isRunning = false;
   private hiddenText = true;
   private receivedPayload = '';
+  private selectedFile: { name: string; mime: string; data: Uint8Array } | null = null;
+  private receivedFile: { name: string; mime: string; blob: Blob } | null = null;
   private rafId = 0;
   private frameCounter = 0;
 
@@ -76,6 +79,14 @@ export class App {
                 <div class="row">
                   <span class="sub">It only leaves this device as sound.</span>
                   <button class="link" id="eye" type="button">Hide</button>
+                </div>
+                <div class="row" style="margin-top: 8px; align-items: center;">
+                  <label class="link" style="display: inline-flex; align-items: center; gap: 4px; cursor: pointer;">
+                    <input type="file" id="file-pick" style="display: none;">
+                    📎 <span id="file-label">Attach file</span>
+                  </label>
+                  <span class="sub" id="file-name" style="font-size: 12px; margin-left: 8px;"></span>
+                  <button class="link" id="file-clear" type="button" style="display: none; color: var(--bad); margin-left: auto;">Remove</button>
                 </div>
               </div>
 
@@ -165,7 +176,14 @@ export class App {
                 </div>
                 <div class="res" id="res" hidden>
                   <div class="out" id="out"></div>
-                  <div class="row">
+                  <div id="file-res" hidden style="margin-top: 10px; padding: 10px; background: var(--field); border: 1px solid var(--line2); border-radius: 8px; display: flex; align-items: center; justify-content: space-between;">
+                    <div>
+                      <b id="file-res-name" style="font-size: 14px; display: block;"></b>
+                      <span id="file-res-size" class="sub"></span>
+                    </div>
+                    <button class="btn" id="btn-dl-file" type="button" style="padding: 6px 14px; font-size: 13px;">Download</button>
+                  </div>
+                  <div class="row" style="margin-top: 8px;">
                     <button class="link" id="show" type="button">Show</button>
                     <button class="link" id="copy" type="button">Copy</button>
                   </div>
@@ -354,14 +372,19 @@ export class App {
   private validate(): void {
     const msg = (this.root.querySelector('#msg') as HTMLTextAreaElement)?.value || '';
     const pin = (this.root.querySelector('#pin') as HTMLInputElement)?.value || '';
-    const n = new TextEncoder().encode(msg).length;
+    const n = this.selectedFile ? this.selectedFile.data.length : new TextEncoder().encode(msg).length;
     const badPin = pin.length > 0 && pin.length < 4;
-    const ok = n > 0 && n <= 512 && !badPin;
+    const maxBytes = this.speed === 'turbo' ? 2048 : 512;
+    const ok = n > 0 && n <= maxBytes && !badPin;
 
     const cnt = this.root.querySelector('#cnt') as HTMLElement;
     if (cnt) {
-      cnt.textContent = n + ' / 512 bytes';
-      cnt.classList.toggle('bad', n > 512);
+      if (this.selectedFile) {
+        cnt.textContent = `${this.selectedFile.name} (${n} B)`;
+      } else {
+        cnt.textContent = `${n} / ${maxBytes} bytes`;
+      }
+      cnt.classList.toggle('bad', n > maxBytes);
     }
 
     const pinGroup = (this.root.querySelector('#pin') as HTMLElement)?.closest('.f');
@@ -436,6 +459,45 @@ export class App {
     eye.addEventListener('click', () => {
       const masked = msg.classList.toggle('mask');
       eye.textContent = masked ? 'Show' : 'Hide';
+    });
+
+    const filePick = this.root.querySelector('#file-pick') as HTMLInputElement;
+    const fileName = this.root.querySelector('#file-name') as HTMLElement;
+    const fileClear = this.root.querySelector('#file-clear') as HTMLButtonElement;
+
+    filePick?.addEventListener('change', () => {
+      const file = filePick.files?.[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        const buf = reader.result as ArrayBuffer;
+        this.selectedFile = {
+          name: file.name,
+          mime: file.type || 'application/octet-stream',
+          data: new Uint8Array(buf),
+        };
+        if (fileName) fileName.textContent = `${file.name} (${(buf.byteLength / 1024).toFixed(1)} KB)`;
+        if (fileClear) fileClear.style.display = 'inline-block';
+        if (msg) {
+          msg.disabled = true;
+          msg.value = `[Attached: ${file.name}]`;
+        }
+        this.validate();
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    fileClear?.addEventListener('click', () => {
+      this.selectedFile = null;
+      if (filePick) filePick.value = '';
+      if (fileName) fileName.textContent = '';
+      if (fileClear) fileClear.style.display = 'none';
+      if (msg) {
+        msg.disabled = false;
+        msg.value = '';
+      }
+      this.validate();
     });
 
     const pins = this.root.querySelectorAll<HTMLInputElement>('#pin, #dpin');
@@ -525,10 +587,26 @@ export class App {
         } catch {}
       }
     });
+
+    const btnDl = this.root.querySelector('#btn-dl-file') as HTMLButtonElement;
+    btnDl?.addEventListener('click', () => {
+      if (this.receivedFile) {
+        downloadBlob(this.receivedFile.blob, this.receivedFile.name);
+      }
+    });
   }
 
   private async handleTransmit() {
-    const text = (this.root.querySelector('#msg') as HTMLTextAreaElement).value.trim();
+    let payload: string | Uint8Array;
+    let byteCount = 0;
+    if (this.selectedFile) {
+      payload = packFile(this.selectedFile.name, this.selectedFile.mime, this.selectedFile.data);
+      byteCount = this.selectedFile.data.length;
+    } else {
+      payload = (this.root.querySelector('#msg') as HTMLTextAreaElement).value.trim();
+      byteCount = new TextEncoder().encode(payload as string).length;
+    }
+
     const pin = (this.root.querySelector('#pin') as HTMLInputElement).value.trim() || undefined;
     const txBtn = this.root.querySelector('#tx') as HTMLButtonElement;
     const viz = this.root.querySelector('#viz') as HTMLElement;
@@ -552,8 +630,7 @@ export class App {
 
     this.transmitter.onStateChange = (state) => {
       if (state === 'done') {
-        const byteCount = new TextEncoder().encode(text).length;
-        this.say('ok', 'Sent', `Transmitted ${byteCount} bytes.`);
+        this.say('ok', 'Sent', `Transmitted ${this.selectedFile ? `file "${this.selectedFile.name}" (${byteCount} B)` : `${byteCount} bytes`}.`);
         bar.style.width = '100%';
         this.root.querySelector('#s3')?.classList.add('done');
         this.stopCurrent(true);
@@ -564,7 +641,7 @@ export class App {
     };
 
     try {
-      await this.transmitter.transmit(text, { mode: this.mode, speed: this.speed, pin });
+      await this.transmitter.transmit(payload, { mode: this.mode, speed: this.speed, pin });
     } catch (err: any) {
       alert(`Error transmitting: ${err.message}`);
       this.stopCurrent(false);
@@ -572,19 +649,27 @@ export class App {
   }
 
   private async handleSaveWav() {
-    const text = (this.root.querySelector('#msg') as HTMLTextAreaElement).value.trim();
+    let payload: string | Uint8Array;
+    let namePrefix = 'sonicdrop';
+    if (this.selectedFile) {
+      payload = packFile(this.selectedFile.name, this.selectedFile.mime, this.selectedFile.data);
+      namePrefix = `sonicdrop-${this.selectedFile.name.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+    } else {
+      payload = (this.root.querySelector('#msg') as HTMLTextAreaElement).value.trim();
+    }
+
     const pin = (this.root.querySelector('#pin') as HTMLInputElement).value.trim() || undefined;
     const wavBtn = this.root.querySelector('#wav') as HTMLButtonElement;
 
     try {
       wavBtn.textContent = 'Saving...';
-      const { pcm, sampleRate } = await this.transmitter.synthesizePCM(text, {
+      const { pcm, sampleRate } = await this.transmitter.synthesizePCM(payload, {
         mode: this.mode,
         speed: this.speed,
         pin,
       });
       const blob = pcmToWavBlob(pcm, sampleRate);
-      downloadBlob(blob, `sonicdrop-${this.mode}-${this.speed}-${Date.now()}.wav`);
+      downloadBlob(blob, `${namePrefix}-${this.mode}-${this.speed}-${Date.now()}.wav`);
       wavBtn.textContent = 'Save WAV';
     } catch (err: any) {
       alert(`Failed to export WAV: ${err.message}`);
@@ -636,9 +721,29 @@ export class App {
     this.receiver.onResult = async (result) => {
       this.receivedPayload = result.text;
       const spdTag = result.speed === 'turbo' ? 'TURBO 1.2k' : 'STD 225b';
+
+      const fileRes = this.root.querySelector('#file-res') as HTMLElement;
+      const fileResName = this.root.querySelector('#file-res-name') as HTMLElement;
+      const fileResSize = this.root.querySelector('#file-res-size') as HTMLElement;
+
+      if (result.file) {
+        this.receivedFile = {
+          name: result.file.name,
+          mime: result.file.mime,
+          blob: new Blob([result.file.data as any], { type: result.file.mime }),
+        };
+        if (fileRes) fileRes.hidden = false;
+        if (fileResName) fileResName.textContent = result.file.name;
+        if (fileResSize) fileResSize.textContent = `${(result.file.size / 1024).toFixed(1)} KB • ${result.file.mime}`;
+        downloadBlob(this.receivedFile.blob, this.receivedFile.name);
+      } else {
+        if (fileRes) fileRes.hidden = true;
+        this.receivedFile = null;
+      }
+
       this.say(
         'ok',
-        'Message received',
+        result.file ? 'File received' : 'Message received',
         `Checksum passed. ${result.errorsFixed} byte error(s) corrected. [${spdTag} • ${result.mode.toUpperCase()}]`,
       );
       bar.style.width = '100%';

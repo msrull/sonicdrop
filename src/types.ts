@@ -35,6 +35,12 @@ export interface ReceiveResult {
   byteLength: number;
   durationMs: number;
   errorsFixed: number;
+  file?: {
+    name: string;
+    mime: string;
+    data: Uint8Array;
+    size: number;
+  };
 }
 
 export type AppPanel = 'send' | 'receive';

@@ -29,8 +29,11 @@ export class Transmitter {
     this.onStateChange?.(s);
   }
 
-  async synthesizePCM(text: string, opts: TransmitOptions): Promise<{ pcm: Float32Array; sampleRate: number }> {
-    let data = new TextEncoder().encode(text);
+  async synthesizePCM(
+    input: string | Uint8Array,
+    opts: TransmitOptions,
+  ): Promise<{ pcm: Float32Array; sampleRate: number }> {
+    let data = typeof input === 'string' ? new TextEncoder().encode(input) : input;
 
     let compressed = false;
     if (opts.compress !== false) {
@@ -79,11 +82,11 @@ export class Transmitter {
     return { pcm, sampleRate: SAMPLE_RATE };
   }
 
-  async transmit(text: string, opts: TransmitOptions): Promise<void> {
+  async transmit(input: string | Uint8Array, opts: TransmitOptions): Promise<void> {
     try {
       this.setState('encoding');
 
-      const { pcm } = await this.synthesizePCM(text, opts);
+      const { pcm } = await this.synthesizePCM(input, opts);
 
       this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
       if (this.ctx.state === 'suspended') {
@@ -186,8 +189,8 @@ export class Transmitter {
     return this.analyserNode;
   }
 
-  getDuration(text: string, opts: TransmitOptions): number {
-    const len = new TextEncoder().encode(text).length;
+  getDuration(input: string | Uint8Array, opts: TransmitOptions): number {
+    const len = typeof input === 'string' ? new TextEncoder().encode(input).length : input.length;
     const headerCrcRs = 3 + 4 + 16;
     if (opts.speed === 'turbo') {
       const totalBytes = len + headerCrcRs;
