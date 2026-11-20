@@ -1,0 +1,7 @@
+=== SONICDROP AIR-GAP TRANSFER TEST ===
+Status: Verified
+Protocol: Quad-Carrier 4-FSK (Turbo 1,200 bps)
+Integrity: Reed-Solomon ECC + CRC-32
+Security: Air-gapped physical acoustic isolation
+Payload: Confirmed delivery via sound wave.
+========================================

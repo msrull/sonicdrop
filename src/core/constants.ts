@@ -26,7 +26,7 @@ export const CRC_BYTES = 4;
 export const RS_PARITY_BYTES = 16;
 export const MAX_INPUT_BYTES = 512;
 export const GOERTZEL_THRESHOLD = 0.00001;
-export const GOERTZEL_SNR_RATIO = 1.8;
+export const GOERTZEL_SNR_RATIO = 1.35;
 export const FADE_SAMPLES = 32;
 
 export const SYMBOL_RATE = SAMPLE_RATE / TOTAL_SYMBOL_SAMPLES;

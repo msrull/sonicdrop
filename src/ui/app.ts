@@ -732,12 +732,20 @@ export class App {
           mime: result.file.mime,
           blob: new Blob([result.file.data as any], { type: result.file.mime }),
         };
-        if (fileRes) fileRes.hidden = false;
+        if (fileRes) {
+          fileRes.hidden = false;
+          fileRes.removeAttribute('hidden');
+          fileRes.style.display = 'flex';
+        }
         if (fileResName) fileResName.textContent = result.file.name;
         if (fileResSize) fileResSize.textContent = `${(result.file.size / 1024).toFixed(1)} KB • ${result.file.mime}`;
         downloadBlob(this.receivedFile.blob, this.receivedFile.name);
       } else {
-        if (fileRes) fileRes.hidden = true;
+        if (fileRes) {
+          fileRes.hidden = true;
+          fileRes.setAttribute('hidden', '');
+          fileRes.style.display = 'none';
+        }
         this.receivedFile = null;
       }
 
@@ -749,6 +757,7 @@ export class App {
       bar.style.width = '100%';
       this.paintReceived();
       res.hidden = false;
+      res.removeAttribute('hidden');
       this.root.querySelector('#r3')?.classList.add('done');
 
       try {

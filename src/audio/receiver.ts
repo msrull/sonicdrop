@@ -48,6 +48,8 @@ export class Receiver {
   private pin: string | null = null;
 
   private preambleBuffer: number[] = [];
+  private preambleStep = 0;
+  private lastPreambleHop = 0;
   private capturedSymbols: number[] = [];
   private capturedBytes: number[] = [];
   private expectedSymbolsTotal = 0;
@@ -190,6 +192,8 @@ export class Receiver {
 
   private resetDetectionState() {
     this.preambleBuffer = [];
+    this.preambleStep = 0;
+    this.lastPreambleHop = 0;
     this.capturedSymbols = [];
     this.capturedBytes = [];
     this.expectedSymbolsTotal = 0;
@@ -231,78 +235,71 @@ export class Receiver {
   }
 
   private handlePreambleSearch(detected: number, maxVal: number) {
-    if (detected === -1) return;
+    if (detected === -1) {
+      if (this.preambleStep > 0 && this.hopCount - this.lastPreambleHop > 30) {
+        this.preambleStep = 0;
+        this.setState('listening');
+      }
+      return;
+    }
 
-    if (this.speed === 'turbo') {
-      const turboPattern = [14, 12, 10, 8, 6, 4, 2, 0];
-      if (detected !== this.lastDetectedSymbol) {
-        this.lastDetectedSymbol = detected;
-        const expected = this.preambleBuffer.length;
-        if (expected < turboPattern.length && detected === turboPattern[expected]) {
-          this.preambleBuffer.push(detected);
-          this.setState('syncing');
-          if (detected === 0) {
-            this.tone7PeakHop = this.hopCount;
-            this.tone7PeakMag = maxVal;
-            this.tone7Hops = 1;
-          }
-        } else if (detected === turboPattern[0]) {
-          this.preambleBuffer = [detected];
-          this.setState('syncing');
-        } else {
-          this.preambleBuffer = [];
-          this.setState('listening');
-        }
-      } else if (detected === 0 && this.preambleBuffer.length === turboPattern.length) {
-        this.tone7Hops++;
-        if (maxVal > this.tone7PeakMag) {
-          this.tone7PeakMag = maxVal;
+    const pattern = this.speed === 'turbo'
+      ? [14, 12, 10, 8, 6, 4, 2, 0]
+      : PREAMBLE_PATTERN;
+
+    if (this.preambleStep === 0) {
+      if (detected === pattern[0]) {
+        this.preambleStep = 1;
+        this.lastPreambleHop = this.hopCount;
+        this.setState('syncing');
+      }
+      return;
+    }
+
+    if (this.preambleStep < pattern.length) {
+      const target = pattern[this.preambleStep];
+      const prev = pattern[this.preambleStep - 1];
+
+      if (detected === target) {
+        this.preambleStep++;
+        this.lastPreambleHop = this.hopCount;
+        if (this.preambleStep === pattern.length) {
           this.tone7PeakHop = this.hopCount;
+          this.tone7PeakMag = maxVal;
+          this.tone7Hops = 1;
         }
-        if (this.tone7Hops >= 4) {
-          this.isSynchronized = true;
-          this.startTime = performance.now();
-          this.capturedBytes = [];
-          this.expectedBytesTotal = 0;
-          this.silenceHops = 0;
-          this.nextSampleHop = this.tone7PeakHop + this.hopsPerSymbol;
-          this.setState('receiving');
+      } else if (detected === prev) {
+        this.lastPreambleHop = this.hopCount;
+      } else {
+        if (this.hopCount - this.lastPreambleHop > 30) {
+          this.preambleStep = 0;
+          this.setState('listening');
         }
       }
     } else {
-      if (detected !== this.lastDetectedSymbol) {
-        this.lastDetectedSymbol = detected;
-        const expected = this.preambleBuffer.length;
-        if (expected < PREAMBLE_LENGTH && detected === PREAMBLE_PATTERN[expected]) {
-          this.preambleBuffer.push(detected);
-          this.setState('syncing');
-          if (detected === 7) {
-            this.tone7PeakHop = this.hopCount;
-            this.tone7PeakMag = maxVal;
-            this.tone7Hops = 1;
-          }
-        } else if (detected === PREAMBLE_PATTERN[0]) {
-          this.preambleBuffer = [detected];
-          this.setState('syncing');
-        } else {
-          this.preambleBuffer = [];
-          this.setState('listening');
-        }
-      } else if (detected === 7 && this.preambleBuffer.length === PREAMBLE_LENGTH) {
+      const lastTone = pattern[pattern.length - 1];
+      if (detected === lastTone) {
         this.tone7Hops++;
+        this.lastPreambleHop = this.hopCount;
         if (maxVal > this.tone7PeakMag) {
           this.tone7PeakMag = maxVal;
           this.tone7PeakHop = this.hopCount;
         }
-        if (this.tone7Hops >= 4) {
-          this.isSynchronized = true;
-          this.startTime = performance.now();
-          this.capturedSymbols = [];
-          this.expectedSymbolsTotal = 0;
-          this.silenceHops = 0;
-          this.nextSampleHop = this.tone7PeakHop + this.hopsPerSymbol;
-          this.setState('receiving');
-        }
+      }
+
+      if (this.tone7Hops >= 2 && (detected !== lastTone || this.tone7Hops >= 8)) {
+        this.isSynchronized = true;
+        this.startTime = performance.now();
+        this.capturedSymbols = [];
+        this.capturedBytes = [];
+        this.expectedSymbolsTotal = 0;
+        this.expectedBytesTotal = 0;
+        this.silenceHops = 0;
+        this.nextSampleHop = this.tone7PeakHop + this.hopsPerSymbol;
+        this.setState('receiving');
+      } else if (this.hopCount - this.lastPreambleHop > 30) {
+        this.preambleStep = 0;
+        this.setState('listening');
       }
     }
   }
