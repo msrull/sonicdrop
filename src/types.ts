@@ -1,4 +1,5 @@
 export type TransmissionMode = 'stealth' | 'audible';
+export type SpeedProfile = 'standard' | 'turbo';
 
 export interface DSPConfig {
   mode: TransmissionMode;
@@ -14,11 +15,13 @@ export interface PacketHeader {
   encrypted: boolean;
   compressed: boolean;
   mode: TransmissionMode;
+  speed: SpeedProfile;
   version: number;
 }
 
 export interface TransmitOptions {
   mode: TransmissionMode;
+  speed?: SpeedProfile;
   pin?: string;
   compress?: boolean;
 }
@@ -27,6 +30,8 @@ export interface ReceiveResult {
   text: string;
   encrypted: boolean;
   compressed: boolean;
+  mode: TransmissionMode;
+  speed: SpeedProfile;
   byteLength: number;
   durationMs: number;
   errorsFixed: number;

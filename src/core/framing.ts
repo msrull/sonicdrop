@@ -8,18 +8,23 @@ import {
   PREAMBLE_PATTERN,
   BITS_PER_SYMBOL,
 } from './constants';
-import type { TransmissionMode, PacketHeader } from '../types';
+import type { TransmissionMode, SpeedProfile, PacketHeader } from '../types';
 
 function buildHeader(
   len: number,
   encrypted: boolean,
   compressed: boolean,
   mode: TransmissionMode,
+  speed: SpeedProfile = 'standard',
 ): Uint8Array {
   const h = new Uint8Array(HEADER_BYTES);
   h[0] = len & 0xFF;
   h[1] = (len >>> 8) & 0xFF;
-  h[2] = (encrypted ? 1 : 0) | (compressed ? 2 : 0) | (mode === 'audible' ? 4 : 0);
+  h[2] =
+    (encrypted ? 1 : 0) |
+    (compressed ? 2 : 0) |
+    (mode === 'audible' ? 4 : 0) |
+    (speed === 'turbo' ? 8 : 0);
   return h;
 }
 
@@ -28,7 +33,8 @@ function parseHeader(h: Uint8Array): PacketHeader {
     payloadLength: h[0] | (h[1] << 8),
     encrypted: Boolean(h[2] & 1),
     compressed: Boolean(h[2] & 2),
-    mode: (h[2] & 4) ? 'audible' : 'stealth',
+    mode: h[2] & 4 ? 'audible' : 'stealth',
+    speed: h[2] & 8 ? 'turbo' : 'standard',
     version: (h[2] >>> 4) & 0xF,
   };
 }
@@ -38,8 +44,20 @@ export function encodePacket(
   encrypted: boolean,
   compressed: boolean,
   mode: TransmissionMode,
+  speed: SpeedProfile = 'standard',
 ): number[] {
-  const header = buildHeader(data.length, encrypted, compressed, mode);
+  const coded = encodePacketBytes(data, encrypted, compressed, mode, speed);
+  return [...PREAMBLE_PATTERN, ...bytesToSymbols(coded)];
+}
+
+export function encodePacketBytes(
+  data: Uint8Array,
+  encrypted: boolean,
+  compressed: boolean,
+  mode: TransmissionMode,
+  speed: SpeedProfile = 'standard',
+): Uint8Array {
+  const header = buildHeader(data.length, encrypted, compressed, mode, speed);
   const inner = new Uint8Array(HEADER_BYTES + data.length);
   inner.set(header);
   inner.set(data, HEADER_BYTES);
@@ -49,8 +67,7 @@ export function encodePacket(
   payload.set(inner);
   payload.set(crcBytes, inner.length);
 
-  const coded = rsEncode(payload, RS_PARITY_BYTES);
-  return [...PREAMBLE_PATTERN, ...bytesToSymbols(coded)];
+  return rsEncode(payload, RS_PARITY_BYTES);
 }
 
 export interface DecodeResult {
@@ -59,8 +76,7 @@ export interface DecodeResult {
   errorsFixed: number;
 }
 
-export function decodePacket(symbols: number[], encodedByteCount: number): DecodeResult {
-  const raw = symbolsToBytes(symbols, encodedByteCount);
+export function decodePacketBytes(raw: Uint8Array): DecodeResult {
   const { data: corrected, corrected: errorsFixed } = rsDecode(raw, RS_PARITY_BYTES);
 
   if (corrected.length < HEADER_BYTES + CRC_BYTES) {
@@ -81,6 +97,11 @@ export function decodePacket(symbols: number[], encodedByteCount: number): Decod
   const data = inner.slice(HEADER_BYTES, HEADER_BYTES + header.payloadLength);
 
   return { header, data, errorsFixed };
+}
+
+export function decodePacket(symbols: number[], encodedByteCount: number): DecodeResult {
+  const raw = symbolsToBytes(symbols, encodedByteCount);
+  return decodePacketBytes(raw);
 }
 
 export function calcSymbolCount(dataLength: number): number {

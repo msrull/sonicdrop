@@ -1,9 +1,15 @@
 import { getDSPConfig, SAMPLE_RATE } from '../core/constants';
-import { encodePacket } from '../core/framing';
+import { encodePacket, encodePacketBytes } from '../core/framing';
 import { generateAudioSamples } from '../core/fsk';
 import { maybeCompress } from '../core/compression';
 import { encrypt } from '../core/crypto';
 import { generateCalibrationChirp } from '../core/calibration';
+import {
+  encodeTurboBytes,
+  getTurboFrequencies,
+  TURBO_PREAMBLE_PATTERN,
+  TURBO_TOTAL_SAMPLES,
+} from '../core/turbo';
 import type { TransmitOptions, TransmitState } from '../types';
 
 export class Transmitter {
@@ -39,8 +45,35 @@ export class Transmitter {
       encrypted = true;
     }
 
+    const speed = opts.speed || 'standard';
+
+    if (speed === 'turbo') {
+      const coded = encodePacketBytes(data, encrypted, compressed, opts.mode, 'turbo');
+      const turboPcm = encodeTurboBytes(coded, opts.mode);
+
+      const freqs = getTurboFrequencies(opts.mode);
+      const preamblePcm = new Float32Array(TURBO_PREAMBLE_PATTERN.length * 640);
+      let off = 0;
+      for (const sym of TURBO_PREAMBLE_PATTERN) {
+        const f = freqs[sym * 2];
+        const inc = (2 * Math.PI * f) / SAMPLE_RATE;
+        for (let i = 0; i < 512; i++) {
+          let amp = 0.8;
+          if (i < 32) amp *= 0.5 * (1 - Math.cos((Math.PI * i) / 32));
+          else if (i >= 512 - 32) amp *= 0.5 * (1 - Math.cos((Math.PI * (511 - i)) / 32));
+          preamblePcm[off + i] = amp * Math.sin(inc * i);
+        }
+        off += 640;
+      }
+
+      const pcm = new Float32Array(preamblePcm.length + turboPcm.length);
+      pcm.set(preamblePcm);
+      pcm.set(turboPcm, preamblePcm.length);
+      return { pcm, sampleRate: SAMPLE_RATE };
+    }
+
     const config = getDSPConfig(opts.mode);
-    const symbols = encodePacket(data, encrypted, compressed, opts.mode);
+    const symbols = encodePacket(data, encrypted, compressed, opts.mode, 'standard');
     const pcm = generateAudioSamples(symbols, config);
 
     return { pcm, sampleRate: SAMPLE_RATE };
@@ -155,8 +188,14 @@ export class Transmitter {
 
   getDuration(text: string, opts: TransmitOptions): number {
     const len = new TextEncoder().encode(text).length;
-    const c = getDSPConfig(opts.mode);
     const headerCrcRs = 3 + 4 + 16;
+    if (opts.speed === 'turbo') {
+      const totalBytes = len + headerCrcRs;
+      const preambleDur = (TURBO_PREAMBLE_PATTERN.length * 640) / SAMPLE_RATE;
+      const payloadDur = (totalBytes * TURBO_TOTAL_SAMPLES) / SAMPLE_RATE;
+      return preambleDur + payloadDur;
+    }
+    const c = getDSPConfig(opts.mode);
     const totalSymbols = 8 + Math.ceil(((len + headerCrcRs) * 8) / 3);
     return (totalSymbols * (c.symbolSamples + c.guardSamples)) / c.sampleRate;
   }

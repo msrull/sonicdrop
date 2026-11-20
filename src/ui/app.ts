@@ -2,7 +2,7 @@ import { Transmitter } from '../audio/transmitter';
 import { Receiver } from '../audio/receiver';
 import { pcmToWavBlob, downloadBlob } from '../core/wav';
 import { evaluateSpectrumHealth } from '../core/calibration';
-import type { TransmissionMode } from '../types';
+import type { TransmissionMode, SpeedProfile } from '../types';
 
 const BANDS: Record<TransmissionMode, [number, number]> = {
   stealth: [18, 20],
@@ -22,6 +22,7 @@ const IDLE = {
 
 export class App {
   private mode: TransmissionMode = 'stealth';
+  private speed: SpeedProfile = 'standard';
   private panel: 'send' | 'recv' = 'send';
   private transmitter = new Transmitter();
   private receiver = new Receiver();
@@ -94,6 +95,17 @@ export class App {
                   <span class="sub" id="cal-hint-send">Channel calibration</span>
                   <button class="link" id="btn-sweep" type="button">Play sweep test</button>
                 </div>
+                <div class="row" style="margin-top: 10px;">
+                  <span class="lab">Speed</span>
+                  <div class="row" style="gap: 12px;">
+                    <label style="font-size: 13px; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                      <input type="radio" name="spd-send" value="standard" checked> Standard (225 bps)
+                    </label>
+                    <label style="font-size: 13px; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                      <input type="radio" name="spd-send" value="turbo"> Turbo (1,200 bps)
+                    </label>
+                  </div>
+                </div>
                 <div class="f">
                   <label class="lab" for="pin">PIN <span class="sub">(optional)</span></label>
                   <input type="text" id="pin" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="4 digits">
@@ -125,6 +137,17 @@ export class App {
                 </div>
                 <div class="row" style="margin-top: 6px;">
                   <span class="sub" id="cal-hint-recv">Auto-profiling active while listening</span>
+                </div>
+                <div class="row" style="margin-top: 10px;">
+                  <span class="lab">Speed</span>
+                  <div class="row" style="gap: 12px;">
+                    <label style="font-size: 13px; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                      <input type="radio" name="spd-recv" value="standard" checked> Standard (225 bps)
+                    </label>
+                    <label style="font-size: 13px; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                      <input type="radio" name="spd-recv" value="turbo"> Turbo (1,200 bps)
+                    </label>
+                  </div>
                 </div>
               </div>
 
@@ -311,8 +334,11 @@ export class App {
   }
 
   private updateBand(): void {
-    const activeRadio = this.root.querySelector<HTMLInputElement>(`#p-${this.panel} input[type=radio]:checked`);
-    this.mode = (activeRadio?.value as TransmissionMode) || 'stealth';
+    const activeChannel = this.root.querySelector<HTMLInputElement>(`#p-${this.panel} input[name^="ch-"]:checked`);
+    this.mode = (activeChannel?.value as TransmissionMode) || 'stealth';
+    const activeSpeed = this.root.querySelector<HTMLInputElement>(`#p-${this.panel} input[name^="spd-"]:checked`);
+    this.speed = (activeSpeed?.value as SpeedProfile) || 'standard';
+
     const [a, b] = BANDS[this.mode];
     const el = this.root.querySelector('#band') as HTMLDivElement;
     const rng = this.root.querySelector('#rng') as HTMLElement;
@@ -321,7 +347,7 @@ export class App {
       el.style.height = ((b - a) / 22) * 100 + '%';
     }
     if (rng) {
-      rng.textContent = a + '–' + b + ' kHz';
+      rng.textContent = `${a}–${b} kHz • ${this.speed === 'turbo' ? 'Turbo 1.2 kbps' : '225 bps'}`;
     }
   }
 
@@ -538,7 +564,7 @@ export class App {
     };
 
     try {
-      await this.transmitter.transmit(text, { mode: this.mode, pin });
+      await this.transmitter.transmit(text, { mode: this.mode, speed: this.speed, pin });
     } catch (err: any) {
       alert(`Error transmitting: ${err.message}`);
       this.stopCurrent(false);
@@ -552,9 +578,13 @@ export class App {
 
     try {
       wavBtn.textContent = 'Saving...';
-      const { pcm, sampleRate } = await this.transmitter.synthesizePCM(text, { mode: this.mode, pin });
+      const { pcm, sampleRate } = await this.transmitter.synthesizePCM(text, {
+        mode: this.mode,
+        speed: this.speed,
+        pin,
+      });
       const blob = pcmToWavBlob(pcm, sampleRate);
-      downloadBlob(blob, `sonicdrop-${this.mode}-${Date.now()}.wav`);
+      downloadBlob(blob, `sonicdrop-${this.mode}-${this.speed}-${Date.now()}.wav`);
       wavBtn.textContent = 'Save WAV';
     } catch (err: any) {
       alert(`Failed to export WAV: ${err.message}`);
@@ -605,7 +635,12 @@ export class App {
 
     this.receiver.onResult = async (result) => {
       this.receivedPayload = result.text;
-      this.say('ok', 'Message received', `Checksum passed. ${result.errorsFixed} byte error(s) corrected.`);
+      const spdTag = result.speed === 'turbo' ? 'TURBO 1.2k' : 'STD 225b';
+      this.say(
+        'ok',
+        'Message received',
+        `Checksum passed. ${result.errorsFixed} byte error(s) corrected. [${spdTag} • ${result.mode.toUpperCase()}]`,
+      );
       bar.style.width = '100%';
       this.paintReceived();
       res.hidden = false;
@@ -624,7 +659,7 @@ export class App {
     };
 
     try {
-      await this.receiver.start(this.mode, pin);
+      await this.receiver.start(this.mode, this.speed, pin);
     } catch (err: any) {
       alert(`Microphone access error: ${err.message}`);
       this.stopCurrent(false);

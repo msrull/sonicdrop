@@ -9,7 +9,17 @@ import {
   GOERTZEL_THRESHOLD,
   GOERTZEL_SNR_RATIO,
 } from '../core/constants';
-import { decodePacket, calcEncodedByteCount } from '../core/framing';
+import {
+  decodePacket,
+  decodePacketBytes,
+  calcEncodedByteCount,
+} from '../core/framing';
+import {
+  getTurboFrequencies,
+  TURBO_SYMBOL_SAMPLES,
+  TURBO_TOTAL_SAMPLES,
+  TURBO_PREAMBLE_PATTERN,
+} from '../core/turbo';
 import { decompress } from '../core/compression';
 import { decrypt } from '../core/crypto';
 import { evaluateSpectrumHealth } from '../core/calibration';
@@ -17,7 +27,9 @@ import type {
   ReceiveResult,
   ReceiveState,
   TransmissionMode,
+  SpeedProfile,
   ChannelHealth,
+  PacketHeader,
 } from '../types';
 
 export class Receiver {
@@ -31,11 +43,14 @@ export class Receiver {
 
   state: ReceiveState = 'idle';
   private mode: TransmissionMode = 'stealth';
+  private speed: SpeedProfile = 'standard';
   private pin: string | null = null;
 
   private preambleBuffer: number[] = [];
   private capturedSymbols: number[] = [];
+  private capturedBytes: number[] = [];
   private expectedSymbolsTotal = 0;
+  private expectedBytesTotal = 0;
   private lastDetectedSymbol = -1;
   private isSynchronized = false;
   private startTime = 0;
@@ -47,7 +62,8 @@ export class Receiver {
   private tone7Hops = 0;
   private nextSampleHop = 0;
   private silenceHops = 0;
-  private readonly hopsPerSymbol = Math.round(TOTAL_SYMBOL_SAMPLES / (GUARD_SAMPLES / 2));
+  private hopsPerSymbol = 10;
+  private lastMags = new Float32Array(16);
 
   onStateChange?: (state: ReceiveState) => void;
   onSymbolDetected?: (symbol: number, mag: number) => void;
@@ -63,8 +79,13 @@ export class Receiver {
     this.onStateChange?.(newState);
   }
 
-  async start(mode: TransmissionMode = 'stealth', pin?: string): Promise<void> {
+  async start(
+    mode: TransmissionMode = 'stealth',
+    speed: SpeedProfile = 'standard',
+    pin?: string,
+  ): Promise<void> {
     this.mode = mode;
+    this.speed = speed;
     this.pin = pin || null;
     this.resetDetectionState();
 
@@ -108,14 +129,26 @@ export class Receiver {
       await this.ctx.audioWorklet.addModule('./worklets/demodulator-worklet.js');
       this.workletNode = new AudioWorkletNode(this.ctx, 'demodulator-processor');
 
-      const config = getDSPConfig(mode);
-      const hopSize = Math.floor(GUARD_SAMPLES / 2);
-      this.workletNode.port.postMessage({
-        type: 'configure',
-        frequencies: config.frequencies,
-        blockSize: SYMBOL_SAMPLES,
-        hopSize: hopSize,
-      });
+      const hopSize = 64;
+      if (speed === 'turbo') {
+        this.hopsPerSymbol = Math.round(TURBO_TOTAL_SAMPLES / hopSize); // 5 hops = 320 samples
+        const freqs = getTurboFrequencies(mode);
+        this.workletNode.port.postMessage({
+          type: 'configure',
+          frequencies: freqs,
+          blockSize: TURBO_SYMBOL_SAMPLES,
+          hopSize: hopSize,
+        });
+      } else {
+        this.hopsPerSymbol = Math.round(TOTAL_SYMBOL_SAMPLES / hopSize); // 10 hops = 640 samples
+        const config = getDSPConfig(mode);
+        this.workletNode.port.postMessage({
+          type: 'configure',
+          frequencies: config.frequencies,
+          blockSize: SYMBOL_SAMPLES,
+          hopSize: hopSize,
+        });
+      }
 
       this.workletNode.port.onmessage = (event) => {
         if (event.data.type === 'magnitudes') {
@@ -157,7 +190,9 @@ export class Receiver {
   private resetDetectionState() {
     this.preambleBuffer = [];
     this.capturedSymbols = [];
+    this.capturedBytes = [];
     this.expectedSymbolsTotal = 0;
+    this.expectedBytesTotal = 0;
     this.lastDetectedSymbol = -1;
     this.isSynchronized = false;
     this.hopCount = 0;
@@ -170,6 +205,7 @@ export class Receiver {
 
   private processMagnitudes(mags: Float32Array) {
     this.hopCount++;
+    this.lastMags.set(mags);
 
     let maxVal = 0;
     let maxIdx = -1;
@@ -194,7 +230,45 @@ export class Receiver {
   }
 
   private handlePreambleSearch(detected: number, maxVal: number) {
-    if (detected !== -1) {
+    if (detected === -1) return;
+
+    if (this.speed === 'turbo') {
+      const turboPattern = [14, 12, 10, 8, 6, 4, 2, 0];
+      if (detected !== this.lastDetectedSymbol) {
+        this.lastDetectedSymbol = detected;
+        const expected = this.preambleBuffer.length;
+        if (expected < turboPattern.length && detected === turboPattern[expected]) {
+          this.preambleBuffer.push(detected);
+          this.setState('syncing');
+          if (detected === 0) {
+            this.tone7PeakHop = this.hopCount;
+            this.tone7PeakMag = maxVal;
+            this.tone7Hops = 1;
+          }
+        } else if (detected === turboPattern[0]) {
+          this.preambleBuffer = [detected];
+          this.setState('syncing');
+        } else {
+          this.preambleBuffer = [];
+          this.setState('listening');
+        }
+      } else if (detected === 0 && this.preambleBuffer.length === turboPattern.length) {
+        this.tone7Hops++;
+        if (maxVal > this.tone7PeakMag) {
+          this.tone7PeakMag = maxVal;
+          this.tone7PeakHop = this.hopCount;
+        }
+        if (this.tone7Hops >= 4) {
+          this.isSynchronized = true;
+          this.startTime = performance.now();
+          this.capturedBytes = [];
+          this.expectedBytesTotal = 0;
+          this.silenceHops = 0;
+          this.nextSampleHop = this.tone7PeakHop + this.hopsPerSymbol;
+          this.setState('receiving');
+        }
+      }
+    } else {
       if (detected !== this.lastDetectedSymbol) {
         this.lastDetectedSymbol = detected;
         const expected = this.preambleBuffer.length;
@@ -235,7 +309,10 @@ export class Receiver {
   private handleSymbolCollection(detected: number, maxIdx: number) {
     if (detected === -1) {
       this.silenceHops++;
-      if (this.silenceHops > this.hopsPerSymbol * 5 && this.capturedSymbols.length >= 8) {
+      if (
+        this.silenceHops > this.hopsPerSymbol * 5 &&
+        (this.capturedSymbols.length >= 8 || this.capturedBytes.length >= 8)
+      ) {
         this.finishCaptureAndDecode();
         return;
       }
@@ -244,14 +321,45 @@ export class Receiver {
     }
 
     if (this.hopCount === this.nextSampleHop) {
-      this.capturedSymbols.push(maxIdx);
-      this.nextSampleHop += this.hopsPerSymbol;
+      if (this.speed === 'turbo') {
+        let b0 = 0, m0 = 0;
+        for (let i = 0; i < 4; i++) if (this.lastMags[i] > m0) { m0 = this.lastMags[i]; b0 = i; }
+        let b1 = 0, m1 = 0;
+        for (let i = 4; i < 8; i++) if (this.lastMags[i] > m1) { m1 = this.lastMags[i]; b1 = i - 4; }
+        let b2 = 0, m2 = 0;
+        for (let i = 8; i < 12; i++) if (this.lastMags[i] > m2) { m2 = this.lastMags[i]; b2 = i - 8; }
+        let b3 = 0, m3 = 0;
+        for (let i = 12; i < 16; i++) if (this.lastMags[i] > m3) { m3 = this.lastMags[i]; b3 = i - 12; }
 
-      this.checkDynamicPacketLength();
-      this.onProgress?.(this.capturedSymbols.length, this.expectedSymbolsTotal);
+        const byte = b0 | (b1 << 2) | (b2 << 4) | (b3 << 6);
+        this.capturedBytes.push(byte);
+        this.nextSampleHop += this.hopsPerSymbol;
 
-      if (this.expectedSymbolsTotal > 0 && this.capturedSymbols.length >= this.expectedSymbolsTotal) {
-        this.finishCaptureAndDecode();
+        this.checkDynamicTurboLength();
+        this.onProgress?.(this.capturedBytes.length, this.expectedBytesTotal);
+
+        if (this.expectedBytesTotal > 0 && this.capturedBytes.length >= this.expectedBytesTotal) {
+          this.finishCaptureAndDecode();
+        }
+      } else {
+        this.capturedSymbols.push(maxIdx);
+        this.nextSampleHop += this.hopsPerSymbol;
+
+        this.checkDynamicPacketLength();
+        this.onProgress?.(this.capturedSymbols.length, this.expectedSymbolsTotal);
+
+        if (this.expectedSymbolsTotal > 0 && this.capturedSymbols.length >= this.expectedSymbolsTotal) {
+          this.finishCaptureAndDecode();
+        }
+      }
+    }
+  }
+
+  private checkDynamicTurboLength() {
+    if (this.expectedBytesTotal === 0 && this.capturedBytes.length >= 3) {
+      const payloadLength = this.capturedBytes[0] | (this.capturedBytes[1] << 8);
+      if (payloadLength > 0 && payloadLength <= 2048) {
+        this.expectedBytesTotal = 3 + payloadLength + 4 + 16;
       }
     }
   }
@@ -287,14 +395,29 @@ export class Receiver {
     const durMs = performance.now() - this.startTime;
 
     try {
-      const encodedByteCount = this.expectedSymbolsTotal > 0
-        ? Math.floor((this.expectedSymbolsTotal * 3) / 8)
-        : Math.floor((this.capturedSymbols.length * 3) / 8);
+      let header: PacketHeader;
+      let data: Uint8Array;
+      let errorsFixed = 0;
 
-      const { header, data, errorsFixed } = decodePacket(
-        this.capturedSymbols,
-        encodedByteCount > 0 ? encodedByteCount : 32,
-      );
+      if (this.speed === 'turbo') {
+        const raw = new Uint8Array(this.capturedBytes);
+        const dec = decodePacketBytes(raw);
+        header = dec.header;
+        data = dec.data;
+        errorsFixed = dec.errorsFixed;
+      } else {
+        const encodedByteCount = this.expectedSymbolsTotal > 0
+          ? Math.floor((this.expectedSymbolsTotal * 3) / 8)
+          : Math.floor((this.capturedSymbols.length * 3) / 8);
+
+        const dec = decodePacket(
+          this.capturedSymbols,
+          encodedByteCount > 0 ? encodedByteCount : 32,
+        );
+        header = dec.header;
+        data = dec.data;
+        errorsFixed = dec.errorsFixed;
+      }
 
       let payload = data;
 
@@ -315,6 +438,8 @@ export class Receiver {
         text,
         encrypted: header.encrypted,
         compressed: header.compressed,
+        mode: this.mode,
+        speed: this.speed,
         byteLength: payload.length,
         durationMs: durMs,
         errorsFixed,
