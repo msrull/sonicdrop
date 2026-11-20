@@ -10,7 +10,7 @@ SonicDrop is an air-gapped acoustic data transfer utility that converts text, pa
 
 ```bash
 # Clone and run locally
-git clone https://github.com/your-username/sonicdrop.git
+git clone https://github.com/msrull/sonicdrop.git
 cd sonicdrop
 npm install
 npm run dev
