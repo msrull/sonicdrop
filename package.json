@@ -1,0 +1,39 @@
+{
+  "name": "sonicdrop",
+  "version": "0.1.0",
+  "description": "Transmit data through sound. No network. No pairing. Just air.",
+  "type": "module",
+  "bin": {
+    "sonicdrop-cli": "./bin/sonicdrop-cli.js"
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:ssl": "cross-env HTTPS=true vite",
+    "build:web": "tsc && vite build",
+    "build:cli": "vite build --config vite.cli.config.ts",
+    "build": "npm run build:web && npm run build:cli",
+    "preview": "vite preview",
+    "cli": "node bin/sonicdrop-cli.js",
+    "test": "npx tsx tests/core.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sonicdrop/sonicdrop.git"
+  },
+  "keywords": [
+    "acoustic-data-transfer",
+    "ultrasonic",
+    "reed-solomon",
+    "web-audio-api",
+    "air-gapped",
+    "offline-sharing"
+  ]
+}
